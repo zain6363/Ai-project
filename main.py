@@ -12,6 +12,7 @@ from constants import *
 from csp_map    import generate_map
 from entities   import PlayerTank, make_enemy, Explosion
 from renderer   import Renderer
+import highscore
 
 
 # ── Level enemy pools ─────────────────────────────────────────
@@ -43,20 +44,29 @@ class Game:
 
     def __init__(self):
         pygame.init()
-        pygame.display.set_caption("BATTLE CITY  |  AI Lab  |  Spring 2026")
+        pygame.display.set_caption("Welcome to Battle City!  |  AI Lab  |  Spring 2026")
         self.screen  = pygame.display.set_mode((WIN_W, WIN_H))
         self.clock   = pygame.time.Clock()
         self.renderer = Renderer(self.screen)
 
         # Global state
         self.running    = True
-        self.scene      = 'menu'   # 'menu' | 'how' | 'playing' | 'over'
+        self.scene      = 'loading'  # 'loading' | 'menu' | 'how' | 'playing' | 'over'
         self.difficulty = 'medium'
         self.diff_cfg   = DIFF[self.difficulty]
 
-        # Menu cursor
-        self.menu_sel   = 0        # 0=Start, 1=HowToPlay, 2=Quit
+        # Loading screen
+        self.load_frames      = 0          # elapsed frames
+        self.load_duration    = 240        # total frames (4 s at 60 fps)
+        self.load_progress    = 0.0        # 0.0 → 1.0
+
+        # Menu cursor  (0=Start, 1=High Scores, 2=How To Play, 3=Quit)
+        self.menu_sel   = 0
         self.show_diff  = False
+
+        # High score state
+        self.new_score_rank = -1              # 0-based rank of last saved entry
+        self.cached_scores  = highscore.load_scores()  # refreshed on each visit
 
         # Level / in-game
         self.level      = 1
@@ -143,22 +153,31 @@ class Game:
 
             elif ev.type == pygame.KEYDOWN:
 
+                # ---- Loading (any key skips) ----
+                if self.scene == 'loading':
+                    if ev.key in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_ESCAPE):
+                        self._finish_loading()
+
                 # ---- Menu ----
-                if self.scene == 'menu':
+                elif self.scene == 'menu':
                     if ev.key in (pygame.K_UP, pygame.K_w):
-                        self.menu_sel = (self.menu_sel - 1) % 3
+                        self.menu_sel = (self.menu_sel - 1) % 4
                         self.show_diff = False
                     elif ev.key in (pygame.K_DOWN, pygame.K_s):
-                        self.menu_sel = (self.menu_sel + 1) % 3
+                        self.menu_sel = (self.menu_sel + 1) % 4
                         self.show_diff = False
                     elif ev.key in (pygame.K_RETURN, pygame.K_SPACE):
-                        if self.menu_sel == 0:
+                        if self.menu_sel == 0:          # START GAME
                             self.show_diff = True
-                        elif self.menu_sel == 1:
+                        elif self.menu_sel == 1:        # HIGH SCORES
+                            self.cached_scores  = highscore.load_scores()
+                            self.new_score_rank = -1
+                            self.scene = 'scores'
+                        elif self.menu_sel == 2:        # HOW TO PLAY
                             self.scene = 'how'
-                        elif self.menu_sel == 2:
+                        elif self.menu_sel == 3:        # QUIT
                             self.running = False
-                    # Difficulty hotkeys (shown in diff panel)
+                    # Difficulty hotkeys
                     elif ev.key == pygame.K_e and self.show_diff:
                         self.difficulty = 'easy'
                         self._start_game()
@@ -170,6 +189,16 @@ class Game:
                         self._start_game()
                     elif ev.key == pygame.K_ESCAPE:
                         self.show_diff = False
+
+                # ---- High Scores ----
+                elif self.scene == 'scores':
+                    if ev.key in (pygame.K_ESCAPE, pygame.K_RETURN):
+                        self.scene = 'menu'
+                        self.new_score_rank = -1
+                    elif ev.key == pygame.K_DELETE:
+                        highscore.clear_scores()
+                        self.cached_scores  = []
+                        self.new_score_rank = -1
 
                 # ---- How to play ----
                 elif self.scene == 'how':
@@ -229,10 +258,7 @@ class Game:
     def _can_enter(self, nx, ny, exclude=None):
         if not (0 <= nx < COLS and 0 <= ny < ROWS):
             return False
-        t = self.map_[ny][nx]
-        if t in (STEEL, WATER, EAGLE):
-            return False
-        if t == BRICK:
+        if self.map_[ny][nx] in (BRICK, STEEL, WATER, EAGLE):
             return False
         for tank in [self.player] + self.enemies:
             if tank is exclude or not tank.alive:
@@ -260,13 +286,29 @@ class Game:
         self.bullets.append(b)
         self.player.fire_timer = self.diff_cfg['player_fire_cd']
 
+    # ── Loading update ────────────────────────────────────────
+
+    def _update_loading(self):
+        if self.scene != 'loading':
+            return
+        self.load_frames += 1
+        # Ease-out progress so it slows near 100%
+        t = min(1.0, self.load_frames / self.load_duration)
+        self.load_progress = t * t * (3 - 2 * t)   # smoothstep
+        if self.load_frames >= self.load_duration:
+            self._finish_loading()
+
+    def _finish_loading(self):
+        self.load_progress = 1.0
+        self.scene = 'menu'
+
     # ── Update ────────────────────────────────────────────────
 
     def _update(self):
         if self.paused or self.scene != 'playing':
             return
 
-        self.renderer.tick()
+        # self.renderer.tick() -> called in main run loop instead
 
         # Banner countdown
         if self.banner_timer > 0:
@@ -406,6 +448,10 @@ class Game:
         self.over_won = won
         if won:
             self.score += self.lives * 500
+        # Persist to leaderboard
+        self.new_score_rank = highscore.save_score(
+            self.score, self.difficulty, self.level, won)
+        self.cached_scores  = highscore.load_scores()
         self.scene = 'over'
 
     def _start_game(self):
@@ -424,8 +470,14 @@ class Game:
     def _render(self):
         self.screen.fill(C["bg"])
 
-        if self.scene == 'menu':
+        if self.scene == 'loading':
+            self.renderer.draw_loading_screen(self.load_progress)
+
+        elif self.scene == 'menu':
             self.renderer.draw_title_screen(self.menu_sel, self.show_diff)
+
+        elif self.scene == 'scores':
+            self.renderer.draw_highscores(self.cached_scores, self.new_score_rank)
 
         elif self.scene == 'how':
             self.renderer.draw_title_screen(self.menu_sel, False)
@@ -504,7 +556,9 @@ class Game:
 
         elif self.scene == 'over':
             self.renderer.draw_title_screen(self.menu_sel, False)
-            self.renderer.draw_game_over(self.score, self.over_won)
+            self.renderer.draw_game_over(
+                self.score, self.over_won,
+                is_highscore=(self.new_score_rank >= 0))
 
         pygame.display.flip()
 
@@ -513,10 +567,12 @@ class Game:
     def run(self):
         while self.running:
             self._handle_events()
-            if self.scene == 'playing' and not self.paused:
+            if self.scene == 'loading':
+                self._update_loading()
+            elif self.scene == 'playing' and not self.paused:
                 self._handle_player_input()
                 self._update()
-            self.renderer.tick()   # advance anim even on menu
+            self.renderer.tick()   # advance anim even on menu / loading
             self._render()
             self.clock.tick(FPS)
 

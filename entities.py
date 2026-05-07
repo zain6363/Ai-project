@@ -226,9 +226,9 @@ class EnemyTank(Tank):
     def _can_move(self, nx, ny, map_, enemies, player):
         if not (0 <= nx < COLS and 0 <= ny < ROWS):
             return False
-        t = map_[ny][nx]
-        if t in (STEEL, WATER, EAGLE):
+        if map_[ny][nx] in (BRICK, STEEL, WATER, EAGLE):
             return False
+
         # Collision with other tanks
         for e in enemies:
             if e is not self and e.alive and e.igx() == nx and e.igy() == ny:
